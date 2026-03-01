@@ -56,5 +56,6 @@ public enum AsyncGuard {
     /// - Parameter configuration: The configuration to apply.
     public static func configure(_ configuration: AsyncGuardConfiguration) {
         ConfigurationStore.shared.set(configuration)
+        Diagnostics.log("AsyncGuard.configured", context: "debugLogging=\(configuration.debugLogging)")
     }
 }

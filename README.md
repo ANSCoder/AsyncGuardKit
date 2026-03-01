@@ -10,7 +10,7 @@
 [![iOS 16+](https://img.shields.io/badge/iOS-16+-000000?style=flat&logo=apple&logoColor=white)](https://developer.apple.com/ios/)
 [![macOS 13+](https://img.shields.io/badge/macOS-13+-000000?style=flat&logo=apple&logoColor=white)](https://developer.apple.com/macos/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/your-org/AsyncGuardKit/ci.yml?style=flat&label=CI)](https://github.com/your-org/AsyncGuardKit/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/ANSCoder/AsyncGuardKit/ci.yml?branch=master&style=flat&label=CI)](https://github.com/ANSCoder/AsyncGuardKit/actions)
 
 [Installation](#installation) · [The Problem](#the-problem) · [API](#api) · [Examples](#real-world-patterns) · [Architecture](#architecture) · [Design](#design-principles) · [Contributing](#contributing)
 
@@ -143,7 +143,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/your-org/AsyncGuardKit", from: "1.0.0")
+    .package(url: "https://github.com/ANSCoder/AsyncGuardKit", from: "1.0.0")
 ]
 ```
 

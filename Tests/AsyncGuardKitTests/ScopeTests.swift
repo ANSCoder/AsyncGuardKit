@@ -78,7 +78,7 @@ final class ScopeTests: XCTestCase {
     }
 
     func testSetCancellableStoreAndCancelAll() async throws {
-        var cancellables = Set<AsyncCancellable>()
+        var cancellables = Set<AnyCancellable>()
         let counter = CancelCounter()
 
         for _ in 0..<4 {
@@ -92,14 +92,27 @@ final class ScopeTests: XCTestCase {
             .store(in: &cancellables)
         }
 
-        XCTAssertEqual(cancellables.count, 4)
+        // All 4 tasks should be tracked — AnyCancellable strongly retains each AsyncTask
+        XCTAssertEqual(
+            cancellables.count, 4,
+            "Set should contain 4 AnyCancellable entries after storing 4 tasks"
+        )
 
-        try await Task.sleep(nanoseconds: 30_000_000)
+        // Let all tasks reach their sleep suspension point before cancelling
+        try await Task.sleep(nanoseconds: 50_000_000)
         cancellables.cancelAll()
-        try await Task.sleep(nanoseconds: 150_000_000)
+
+        // Give cancellation signal time to propagate cooperatively through each task
+        try await Task.sleep(nanoseconds: 300_000_000)
 
         let cancelled = await counter.value
-        XCTAssertEqual(cancelled, 4)
-        XCTAssertTrue(cancellables.isEmpty)
+        XCTAssertEqual(
+            cancelled, 4,
+            "All 4 tasks must receive CancellationError — AnyCancellable must strongly retain AsyncTask so cancel() is delivered even with no other owner"
+        )
+        XCTAssertTrue(
+            cancellables.isEmpty,
+            "cancelAll() must clear the set after cancelling all tasks"
+        )
     }
 }

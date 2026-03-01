@@ -143,8 +143,9 @@ public final class AsyncTask: @unchecked Sendable {
     @discardableResult
     public func store(in set: inout Set<AnyCancellable>) -> Self {
         _ownershipTransferred = true
-        let cancellable = AnyCancellable(self) { [weak self] in
-            self?._task.cancel()
+        let task = _task
+        let cancellable = AnyCancellable(self) {
+            task.cancel()
         }
         set.insert(cancellable)
         Diagnostics.log("AsyncTask.storedInSet")

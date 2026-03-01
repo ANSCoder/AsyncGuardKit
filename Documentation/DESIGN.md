@@ -1,12 +1,10 @@
-# AsyncGuardKit – Structured Concurrency Coordination Toolkit
-
-## Authors
-
-Anand (AsyncGuardKit)
+# AsyncGuardKit – Design Document
 
 ## Status
+Implemented — v1.0.0
 
-Design Proposal (Swift Package)
+## Authors
+Anand (ANSCoder)
 
 ---
 
@@ -94,7 +92,7 @@ AsyncGuardKit does not:
 ### Task Lifetime Binding
 
 ```swift
-public final class AsyncTask: AsyncCancellable
+public final class AsyncTask
 public final class AsyncLifetime
 ````
 

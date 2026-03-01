@@ -5,22 +5,15 @@
 .build/
 .swiftpm/
 
-# Xcode user data
+# Xcode
+DerivedData/
+*.xcworkspace
 xcuserdata/
 *.xcuserstate
-*.xcscmblueprint
 
-# Xcode workspace
-*.xcworkspace
+# Xcode Project user data
+**/xcuserdata/
+**/*.xcuserstate
 
-# Derived data
-DerivedData/
-
-# Fastlane (if ever used)
-fastlane/report.xml
-fastlane/Preview.html
-fastlane/screenshots/
-fastlane/test_output/
-
-# Logs
-*.log
+# App icon cache
+Assets.xcassets/AppIcon.appiconset/*.png

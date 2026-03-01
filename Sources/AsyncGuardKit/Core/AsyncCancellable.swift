@@ -18,31 +18,45 @@ import Foundation
 /// AsyncTask { await loadData() }
 ///     .store(in: &cancellables)
 ///
-/// // Cancel everything at once
 /// cancellables.cancelAll()
 /// ```
 ///
+/// ## Ownership
+///
+/// `AnyCancellable` **strongly retains** the wrapped `AsyncTask`. This ensures
+/// the task is not deallocated between `.store(in:)` and `cancelAll()`, which
+/// would silently prevent cancellation from being delivered.
+///
 /// ## Identity
 ///
-/// Two `AnyCancellable` instances are equal if and only if they wrap the
-/// same underlying object. This is determined by object identity (`===`),
-/// not by value equality.
-///
-/// - Note: `AnyCancellable` is `Hashable` via `ObjectIdentifier`, making
-///   it safe to store in `Set` and use as a `Dictionary` key.
+/// Two `AnyCancellable` instances are equal if and only if they wrap the same
+/// underlying object, determined by object identity (`ObjectIdentifier`).
 public final class AnyCancellable: Hashable, @unchecked Sendable {
+
+    // MARK: - Storage
 
     private let _cancel: () -> Void
     private let _id: ObjectIdentifier
+    /// Strong reference — keeps the wrapped AsyncTask alive for the
+    /// full lifetime of this AnyCancellable. Without this, a task
+    /// stored via .store(in:) with no other owner would deallocate
+    /// immediately, making cancel() a no-op.
+    private let _retained: AnyObject
+
+    // MARK: - Init
 
     /// Creates a type-erased cancellable wrapping the given object.
     ///
-    /// - Parameter cancellable: Any object that conforms to the internal
-    ///   cancellation contract. Typically an ``AsyncTask``.
+    /// - Parameters:
+    ///   - cancellable: The object to retain and identify this cancellable by.
+    ///   - cancel: The closure to invoke when ``cancel()`` is called.
     internal init<C: AnyObject>(_ cancellable: C, cancel: @escaping () -> Void) {
         self._cancel = cancel
         self._id = ObjectIdentifier(cancellable)
+        self._retained = cancellable
     }
+
+    // MARK: - Public API
 
     /// Cancels the underlying task.
     ///
@@ -52,7 +66,7 @@ public final class AnyCancellable: Hashable, @unchecked Sendable {
         _cancel()
     }
 
-    // MARK: Hashable
+    // MARK: - Hashable
 
     public static func == (lhs: AnyCancellable, rhs: AnyCancellable) -> Bool {
         lhs._id == rhs._id

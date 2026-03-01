@@ -26,7 +26,7 @@ final class BenchmarkTests: XCTestCase {
     func testAsyncTaskStoreInSetOverhead() async throws {
         let iterations = 500
         let clock = ContinuousClock()
-        var cancellables = Set<AsyncCancellable>()
+        var cancellables = Set<AnyCancellable>()
 
         let start = clock.now
         for _ in 0..<iterations {
