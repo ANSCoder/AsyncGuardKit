@@ -57,17 +57,20 @@ import Foundation
 ///     Defaults to retrying on all errors.
 ///   - operation: The async, throwing operation to execute.
 /// - Returns: The value returned by the first successful attempt.
+/// - Note: `operation` runs on the caller's actor (`isolation`), so it may
+///   freely capture non-`Sendable` state of that actor.
 /// - Throws: The error from the final attempt, or `CancellationError` if
 ///   the enclosing task is cancelled.
-public func retry<T: Sendable>(
+public func retry<T>(
     attempts: Int,
     backoff: RetryBackoff = .none,
-    shouldRetry: @Sendable (Error) -> Bool = { _ in true },
-    operation: @escaping @Sendable () async throws -> T
+    shouldRetry: (Error) -> Bool = { _ in true },
+    isolation: isolated (any Actor)? = #isolation,
+    operation: () async throws -> T
 ) async throws -> T {
     precondition(attempts >= 1, "retry(attempts:) requires at least 1 attempt")
 
-    var lastError: Error?
+    var lastError: any Error = CancellationError()
 
     for attempt in 0..<attempts {
         try Task.checkCancellation()
@@ -85,14 +88,14 @@ public func retry<T: Sendable>(
             let isLastAttempt = attempt == attempts - 1
             guard !isLastAttempt, shouldRetry(error) else { break }
 
-            let delayNanoseconds = backoff.delay(for: attempt)
-            if delayNanoseconds > 0 {
-                try await Task.sleep(nanoseconds: delayNanoseconds)
+            let delay = backoff.delay(for: attempt)
+            if delay > .zero {
+                try await Task.sleep(for: delay)
             }
         }
     }
 
-    throw lastError!
+    throw lastError
 }
 
 // MARK: - RetryBackoff
@@ -131,26 +134,20 @@ public enum RetryBackoff: Sendable {
     case exponential(base: Duration)
 
     /// Returns the nanosecond delay for a given 0-based attempt index.
-    internal func delay(for attempt: Int) -> UInt64 {
+    internal func delay(for attempt: Int) -> Duration {
         switch self {
         case .none:
-            return 0
+            return .zero
         case .fixed(let duration):
-            return UInt64(max(0, duration.nanoseconds))
+            return max(.zero, duration)
         case .exponential(let base):
-            let multiplier = UInt64(pow(2.0, Double(attempt)))
-            let baseNanos = UInt64(max(0, base.nanoseconds))
-            let (result, overflow) = baseNanos.multipliedReportingOverflow(by: multiplier)
-            return overflow ? UInt64.max : result
+            // 2^attempt overflows Int64 at 63; clamp the shift so large
+            // attempt counts saturate instead of trapping.
+            let multiplier = 1 << min(attempt, 62)
+            // Saturate at ~68 years rather than overflowing Duration's Int128.
+            let cap = Duration.seconds(Int32.max)
+            let base = max(.zero, base)
+            return base > cap / multiplier ? cap : base * multiplier
         }
-    }
-}
-
-// MARK: - Duration nanoseconds
-
-private extension Duration {
-    var nanoseconds: Int64 {
-        let (seconds, attoseconds) = components
-        return seconds * 1_000_000_000 + attoseconds / 1_000_000_000
     }
 }

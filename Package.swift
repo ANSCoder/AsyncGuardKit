@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
@@ -18,18 +18,13 @@ let package = Package(
     targets: [
         .target(
             name: "AsyncGuardKit",
-            path: "Sources/AsyncGuardKit",
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+            path: "Sources/AsyncGuardKit"
         ),
         .testTarget(
             name: "AsyncGuardKitTests",
             dependencies: ["AsyncGuardKit"],
-            path: "Tests/AsyncGuardKitTests",
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+            path: "Tests/AsyncGuardKitTests"
         )
-    ]
+    ],
+    swiftLanguageModes: [.v6]
 )

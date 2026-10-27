@@ -6,7 +6,7 @@
 
 **Structured task lifetime management for Swift.**
 
-[![Swift 5.9+](https://img.shields.io/badge/Swift-5.9+-F05138?style=flat&logo=swift&logoColor=white)](https://swift.org)
+[![Swift 6](https://img.shields.io/badge/Swift-6.0+-F05138?style=flat&logo=swift&logoColor=white)](https://swift.org)
 [![iOS 16+](https://img.shields.io/badge/iOS-16+-000000?style=flat&logo=apple&logoColor=white)](https://developer.apple.com/ios/)
 [![macOS 13+](https://img.shields.io/badge/macOS-13+-000000?style=flat&logo=apple&logoColor=white)](https://developer.apple.com/macos/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
@@ -18,120 +18,40 @@
 
 ---
 
-AsyncGuardKit eliminates the manual cancellation boilerplate that developers write — and forget — when using Swift concurrency. It gives you three focused, composable tools: **automatic lifetime binding**, **single-flight deduplication**, and **retry with backoff** — each designed to feel native to Swift.
+AsyncGuardKit removes the cancellation boilerplate that Swift concurrency leaves to you. Three small, composable primitives — **lifetime-bound tasks**, **single-flight deduplication**, and **cancellation-aware retry** — built for Swift 6 strict concurrency, with zero dependencies.
+
+| | |
+|---|---|
+| 🔗 **`AsyncTask` + `AsyncLifetime`** | Tasks that are cancelled when their owner goes away |
+| 🛫 **`withSingleFlight`** | N concurrent callers → one operation → one shared result |
+| 🔁 **`retry`** | Backoff, predicates, overflow-safe, stops the instant you are cancelled |
 
 ---
 
 ## Why this exists
 
-Swift concurrency is excellent. Managing task lifetimes manually is not.
-
-Every Swift developer has written a version of this:
+An unowned `Task {}` keeps running after the screen that started it is gone. A token refresh fired from ten views hits your server ten times. Hand-rolled retry loops forget `CancellationError`. These are the *default* outcome of Swift concurrency without a lifetime strategy.
 
 ```swift
-class FeedViewModel: ObservableObject {
-    func load() {
-        Task {
-            let items = try await api.fetchFeed()
-            self.items = items  // 💥 crashes if ViewModel was released
-        }
-        // This task has no owner.
-        // It runs after the ViewModel is gone.
-        // It mutates deallocated state.
-        // Everyone writes this. Everyone gets burned by it.
-    }
+// ✅ Owned, cancelled with its owner
+AsyncTask { [weak self] in
+    let profile = try await api.fetchProfile()
+    await self?.apply(profile)
 }
-```
+.bind(to: lifetime)
 
-And every team with a networking layer has shipped a version of this:
-
-```swift
-// User opens a screen. 10 views load simultaneously.
-// Each detects an expired token. Each calls refreshToken().
-// Your auth server gets 10 simultaneous refresh requests.
-// Race conditions ensue. Nobody can reproduce it in development.
-```
-
-These are not edge cases. They are the **default outcome** of Swift concurrency without a lifetime strategy. AsyncGuardKit gives you that strategy — three primitives, zero dependencies, an API that reads like Swift.
-
----
-
-## The problem
-
-### Problem 1 — Tasks outlive their owner
-
-```swift
-// ❌ Unowned task — crashes or corrupts state
-class ProfileViewModel: ObservableObject {
-    func load() {
-        Task {
-            let profile = try await api.fetchProfile()
-            self.profile = profile  // self may already be gone
-        }
-        // No way to cancel. No owner. No cleanup.
-    }
-}
-```
-
-### Problem 2 — Token refresh stampede
-
-```swift
-// ❌ 10 callers → 10 network requests → race conditions
-func fetchData() async throws -> Data {
-    let token = try await auth.refreshToken()  // called 10× simultaneously
-    return try await api.fetch(token: token)
-}
-```
-
-### Problem 3 — Hand-rolled retry
-
-```swift
-// ❌ Inconsistent, error-prone, not cancellation-aware
-var attempts = 0
-while attempts < 3 {
-    do {
-        return try await api.call()
-    } catch {
-        attempts += 1
-        try await Task.sleep(nanoseconds: 1_000_000_000 * UInt64(attempts))
-        // Does this propagate CancellationError? Depends who wrote it.
-    }
-}
-```
-
----
-
-## The solution
-
-```swift
-// ✅ Lifetime-bound task — zero cleanup code
-class ProfileViewModel: ObservableObject {
-    private let lifetime = AsyncLifetime()
-
-    func load() {
-        AsyncTask {
-            let profile = try await api.fetchProfile()
-            await MainActor.run { self.profile = profile }
-        }
-        .bind(to: lifetime)
-        // When ProfileViewModel deallocates → task cancelled. Automatically.
-    }
-}
-```
-
-```swift
-// ✅ Single-flight deduplication — one request, all callers get the result
+// ✅ Ten callers, one refresh
 let token = try await withSingleFlight(key: "token-refresh") {
     try await auth.refreshToken()
 }
-```
 
-```swift
-// ✅ Structured retry — cancellable, composable, testable
+// ✅ Cancellable, composable retry
 let data = try await retry(attempts: 3, backoff: .exponential(base: .seconds(1))) {
     try await api.call()
 }
 ```
+
+> **Capture `self` weakly.** `AsyncTask` cancels when its `AsyncLifetime` deallocates, but a running task that captures its owner strongly keeps that owner alive. Use `[weak self]` (as above) so deallocation can actually happen.
 
 ---
 
@@ -143,7 +63,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/ANSCoder/AsyncGuardKit", from: "1.0.0")
+    .package(url: "https://github.com/ANSCoder/AsyncGuardKit", from: "1.0.0")  // check Releases for the latest
 ]
 ```
 
@@ -176,8 +96,8 @@ import AsyncGuardKit
 | macOS | 13.0 |
 | tvOS | 16.0 |
 | watchOS | 9.0 |
-| Swift | 5.9 |
-| Xcode | 15.0 |
+| Swift | 6.0 (builds in Swift 6 language mode) |
+| Xcode | 16.0 |
 
 ---
 
@@ -217,25 +137,29 @@ AsyncTask(priority: .userInitiated) {
 
 ### `AsyncLifetime`
 
-Cancels all bound tasks when it deallocates. Declare it as a `let` property — it lives and dies with its owner.
+Cancels all bound tasks when it deallocates. Declare it as a `let` property — it lives and dies with its owner. Tasks that finish on their own are released immediately, so `count` reflects only work still in flight.
 
 ```swift
-class FeedViewModel: ObservableObject {
-    @Published var items: [Item] = []
+@MainActor @Observable
+final class FeedViewModel {
+    var items: [Item] = []
     private let lifetime = AsyncLifetime()  // one line
 
     func load() {
-        AsyncTask { self.items = try await api.fetchFeed() }
-            .bind(to: lifetime)
-        // ↑ Cancelled when FeedViewModel is released.
-        //   No deinit. No cancelAll(). Nothing to forget.
+        AsyncTask { [weak self] in
+            let items = try await api.fetchFeed()
+            await self?.apply(items)
+        }
+        .bind(to: lifetime)
+        // ↑ Cancelled when FeedViewModel is released. No deinit needed.
     }
 
     func refresh() {
         lifetime.cancelAll()  // cancel in-flight, restart fresh
-        AsyncTask { self.items = try await api.fetchFeed() }
-            .bind(to: lifetime)
+        load()
     }
+
+    private func apply(_ items: [Item]) { self.items = items }
 }
 ```
 
@@ -243,7 +167,7 @@ class FeedViewModel: ObservableObject {
 
 ### `Set<AnyCancellable>`
 
-Combine-familiar manual cancellation. Same muscle memory, no Combine dependency.
+Combine-familiar manual cancellation. Same muscle memory, no Combine dependency. (If you also `import Combine`, qualify the type as `AsyncGuardKit.AnyCancellable`.)
 
 ```swift
 var cancellables = Set<AnyCancellable>()
@@ -259,6 +183,8 @@ cancellables.cancelAll()  // cancel and clear
 ### `withSingleFlight(key:operation:)`
 
 Execute an operation exactly once for a given key. All concurrent callers for the same key join the in-flight operation and receive the same result — or the same error.
+
+**Cancellation:** cancelling one caller never cancels work others are still waiting on. When the *last* waiter is cancelled, the shared operation is cancelled and the key is freed, so the next call starts fresh.
 
 Named following Apple's `with*` convention (`withTaskGroup`, `withCheckedContinuation`) to make scoping semantics immediately recognizable.
 
@@ -282,9 +208,9 @@ let profile = try await withSingleFlight(key: APIKey.userProfile(id: userID)) {
 
 ---
 
-### `retry(attempts:backoff:shouldRetry:operation:)`
+### `retry(attempts:backoff:shouldRetry:isolation:operation:)`
 
-Retry with configurable backoff. Stops immediately on `CancellationError`, including during a backoff delay.
+Retry with configurable backoff. Stops immediately on `CancellationError`, including during a backoff delay. Exponential delays saturate instead of overflowing, so very high attempt counts are safe. The operation runs on the **caller's actor**, so it can use that actor's non-`Sendable` state without `@Sendable` gymnastics.
 
 ```swift
 // Exponential: 1s → 2s → 4s
@@ -298,10 +224,12 @@ let result = try await retry(attempts: 5, backoff: .fixed(.milliseconds(500))) {
 }
 
 // Conditional: only retry on specific errors
-let response = try await retry(attempts: 3, backoff: .exponential(base: .seconds(1))) {
+let response = try await retry(
+    attempts: 3,
+    backoff: .exponential(base: .seconds(1)),
+    shouldRetry: { ($0 as? URLError)?.code == .networkConnectionLost }
+) {
     try await api.post(request)
-} shouldRetry: { error in
-    (error as? URLError)?.code == .networkConnectionLost
 }
 ```
 
@@ -319,30 +247,37 @@ let response = try await retry(attempts: 3, backoff: .exponential(base: .seconds
 
 ### SwiftUI search ViewModel
 
+> `@Observable` needs iOS 17+; on iOS 16 use `ObservableObject` + `@Published` — the `AsyncTask` code is identical.
+
 ```swift
-@MainActor
-class SearchViewModel: ObservableObject {
-    @Published var results: [SearchResult] = []
-    @Published var isLoading = false
+@MainActor @Observable
+final class SearchViewModel {
+    var results: [SearchResult] = []
+    var isLoading = false
 
     private let lifetime = AsyncLifetime()
 
     func search(query: String) {
         lifetime.cancelAll()  // cancel previous search
 
-        AsyncTask {
-            self.isLoading = true
-            defer { self.isLoading = false }
-
+        AsyncTask { [weak self] in
+            await self?.setLoading(true)
             do {
-                self.results = try await withSingleFlight(key: "search:\(query)") {
+                let results = try await withSingleFlight(key: "search:\(query)") {
                     try await SearchAPI.search(query: query)
                 }
-            } catch is CancellationError {
-                // User typed again — expected, not an error
+                await self?.finish(results)
+            } catch {
+                await self?.setLoading(false)  // includes CancellationError
             }
         }
         .bind(to: lifetime)
+    }
+
+    private func setLoading(_ value: Bool) { isLoading = value }
+    private func finish(_ results: [SearchResult]) {
+        self.results = results
+        isLoading = false
     }
 }
 ```
@@ -350,20 +285,18 @@ class SearchViewModel: ObservableObject {
 ### UIKit ViewController with retry
 
 ```swift
-class FeedViewController: UIViewController {
+@MainActor
+final class FeedViewController: UIViewController {
     private let lifetime = AsyncLifetime()
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
-        AsyncTask {
-            let feed = try await retry(
-                attempts: 3,
-                backoff: .exponential(base: .seconds(1))
-            ) {
+        AsyncTask { [weak self] in
+            let feed = try await retry(attempts: 3, backoff: .exponential(base: .seconds(1))) {
                 try await FeedAPI.fetch()
             }
-            await MainActor.run { self.render(feed) }
+            await self?.render(feed)
         }
         .bind(to: lifetime)
     }
@@ -378,7 +311,7 @@ class FeedViewController: UIViewController {
 ### Authenticated networking layer
 
 ```swift
-class AuthenticatedAPIClient {
+actor AuthenticatedAPIClient {
 
     func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T {
         // Token refreshed exactly once regardless of concurrent callers
@@ -414,9 +347,9 @@ private extension URLError {
            │                               │
            ▼                               ▼
 ┌──────────────────────┐        ┌──────────────────────┐
-│  Execution Context   │        │  SingleFlight        │
-│  (caller's actor,    │        │  Deduplication       │
-│   no silent hops)    │        │  (actor-backed)      │
+│  Caller              │        │  SingleFlight        │
+│  (any actor or       │        │  Deduplication       │
+│   task context)      │        │  (actor-backed)      │
 └──────────┬───────────┘        └──────────┬───────────┘
            │                               │
            └───────────────┬───────────────┘
@@ -464,8 +397,7 @@ private extension URLError {
 
 | Layer | Responsibility |
 |---|---|
-| **Execution Context** | Preserves caller's actor. Never silently hops. |
-| **SingleFlight Registry** | Actor-backed map of `(key, type) → Task`. New callers join rather than duplicate. Cleaned up on completion or failure. |
+| **SingleFlight Registry** | Actor-backed map of `(key, type) → Task`. New callers join rather than duplicate. Waiter-counted: cancelled with its last waiter, cleaned up on completion or failure. |
 | **Scoped Task Management** | `AsyncLifetime` — `deinit` cancels. `AnyCancellable` — you control when. |
 | **Concurrency Policies** | `retry` — cancellation-aware loop with pluggable `RetryBackoff`. Free functions, not wrapper types. |
 | **AsyncTask** | Owns the underlying `Task`. Enforces that every task declares its lifetime strategy. Cancels defensively in `deinit` if strategy was never declared. |
@@ -491,7 +423,7 @@ Swift cannot make `any Protocol` conform to `Hashable`, which `Set` requires. A 
 
 ### Why not an actor for `AsyncTask`?
 
-Actors serialize access via suspension points. A task wrapper implemented as an actor would add unnecessary awaits to operations that are already thread-safe by construction. `AsyncTask` uses `NSLock` only for the minimal ownership-transfer flag — no suspension, no reentrancy risk.
+Actors serialize access via suspension points. A task wrapper implemented as an actor would add unnecessary awaits to operations that are already thread-safe by construction. `AsyncTask` uses `NSLock` only for its small lifecycle state (ownership, completion hook) — no suspension, no reentrancy risk.
 
 ---
 
@@ -526,7 +458,7 @@ All logging is compiled out entirely in release builds — `#if DEBUG` eliminate
 
 ## Design principles
 
-**Explicit over implicit.** AsyncGuardKit never silently switches actor context, auto-cancels tasks without declaration, or makes scheduling decisions on your behalf. Every behavior is visible at the call site.
+**Explicit over implicit.** AsyncGuardKit never auto-cancels tasks without declaration or makes scheduling decisions on your behalf. `AsyncTask` operations are `@Sendable` and non-isolated — hop to an actor explicitly (`await self?.apply(...)`). Every behavior is visible at the call site.
 
 **Lifetime binding over manual cleanup.** The `deinit`-based model means correctly managed tasks require zero cleanup code. The absence of a `deinit` override is not a bug — it is the correct outcome.
 
