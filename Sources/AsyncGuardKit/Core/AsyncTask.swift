@@ -51,7 +51,36 @@ public final class AsyncTask: @unchecked Sendable {
     // MARK: - Storage
 
     private let _task: Task<Void, Never>
-    private var _ownershipTransferred = false
+    private let _state = State()
+
+    /// Lock-protected lifecycle flags shared with the running task.
+    private final class State: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ownershipTransferred = false
+        private var finished = false
+        private var onFinish: (@Sendable () -> Void)?
+
+        func transferOwnership() { lock.withLock { ownershipTransferred = true } }
+        var isOwned: Bool { lock.withLock { ownershipTransferred } }
+
+        /// Registers a completion hook; returns `false` if already finished.
+        func setOnFinish(_ hook: @escaping @Sendable () -> Void) -> Bool {
+            lock.withLock {
+                guard !finished else { return false }
+                onFinish = hook
+                return true
+            }
+        }
+
+        func markFinished() {
+            let hook = lock.withLock { () -> (@Sendable () -> Void)? in
+                finished = true
+                defer { onFinish = nil }
+                return onFinish
+            }
+            hook?()
+        }
+    }
 
     // MARK: - Init
 
@@ -68,8 +97,10 @@ public final class AsyncTask: @unchecked Sendable {
         priority: TaskPriority? = nil,
         operation: @escaping @Sendable () async -> Void
     ) {
+        let state = _state
         _task = Task(priority: priority) {
             await operation()
+            state.markFinished()
         }
         Diagnostics.log("AsyncTask.created")
     }
@@ -86,6 +117,7 @@ public final class AsyncTask: @unchecked Sendable {
         priority: TaskPriority? = nil,
         operation: @escaping @Sendable () async throws -> Void
     ) {
+        let state = _state
         _task = Task(priority: priority) {
             do {
                 try await operation()
@@ -94,12 +126,13 @@ public final class AsyncTask: @unchecked Sendable {
             } catch {
                 Diagnostics.log("AsyncTask.failed", context: String(describing: error))
             }
+            state.markFinished()
         }
         Diagnostics.log("AsyncTask.created")
     }
 
     deinit {
-        if !_ownershipTransferred {
+        if !_state.isOwned {
             _task.cancel()
             Diagnostics.log("AsyncTask.cancelledOnDeinit")
         }
@@ -120,7 +153,7 @@ public final class AsyncTask: @unchecked Sendable {
     /// - Parameter lifetime: The lifetime to bind to.
     @discardableResult
     public func bind(to lifetime: AsyncLifetime) -> Self {
-        _ownershipTransferred = true
+        _state.transferOwnership()
         lifetime.add(self)
         Diagnostics.log("AsyncTask.boundToLifetime")
         return self
@@ -142,7 +175,7 @@ public final class AsyncTask: @unchecked Sendable {
     /// - Parameter set: The ``AnyCancellable`` set to store into.
     @discardableResult
     public func store(in set: inout Set<AnyCancellable>) -> Self {
-        _ownershipTransferred = true
+        _state.transferOwnership()
         let task = _task
         let cancellable = AnyCancellable(self) {
             task.cancel()
@@ -163,12 +196,18 @@ public final class AsyncTask: @unchecked Sendable {
     /// ```
     @discardableResult
     public func detached() -> Self {
-        _ownershipTransferred = true
+        _state.transferOwnership()
         Diagnostics.log("AsyncTask.detached")
         return self
     }
 
     /// Cancels the underlying task cooperatively.
+    /// Calls `hook` once the task has finished (immediately skipped if it already has).
+    /// Returns `false` when the task is already complete.
+    internal func onFinish(_ hook: @escaping @Sendable () -> Void) -> Bool {
+        _state.setOnFinish(hook)
+    }
+
     public func cancel() {
         _task.cancel()
         Diagnostics.log("AsyncTask.cancelled")

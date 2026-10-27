@@ -1,3 +1,5 @@
+import Foundation
+
 /// An actor-isolated registry that deduplicates concurrent async operations by key.
 ///
 /// `SingleFlightRegistry` is the engine behind ``withSingleFlight(key:operation:)``.
@@ -13,15 +15,16 @@
 /// `FlightKey` encodes both the caller's key and `ObjectIdentifier(T.self)`,
 /// preventing collisions between callers sharing the same string key but
 /// expecting different return types. Joining an existing flight downcasts
-/// `AnyFlight → Flight<T>`, which is guaranteed safe by the `typeID` match.
+/// to `Flight<T>`, which is guaranteed safe by the `typeID` match.
 /// No force-unwrapped casts appear at any call site.
 ///
 /// ## Lifecycle
 ///
 /// A flight entry is inserted when the first caller for a given key arrives
-/// and removed — via `defer` — when that operation completes, fails, or is
-/// cancelled. Subsequent callers for the same key therefore always start a
-/// fresh operation rather than joining a stale one.
+/// and removed once every waiter has left — because the operation completed,
+/// failed, or all waiters were cancelled. Cancelling one waiter never cancels
+/// the shared operation while others still wait; cancelling the last one does,
+/// and the entry is dropped immediately so the next caller starts fresh.
 ///
 /// ## Thread safety
 ///
@@ -36,58 +39,33 @@ internal actor SingleFlightRegistry {
 
     // MARK: - Type-preserving flight box
 
-    /// A type-erased protocol that allows heterogeneous storage of `Flight<T>`
-    /// values in a single dictionary without losing the ability to await them.
-    private protocol AnyFlight: AnyObject {
-        /// Awaits the underlying task and returns its value erased to `Any`.
-        func awaitResult() async throws -> Any
-    }
-
-    /// A concrete, type-preserving wrapper around a `Task<T, Error>`.
-    ///
-    /// Storing `Task<T, Error>` directly — rather than erasing to `Task<Any, Error>`
-    /// — eliminates all force casts at join sites. The `Flight<T>` is recovered
-    /// from the registry via `as? Flight<T>`, which is guaranteed to succeed
-    /// when `FlightKey.typeID` matches.
-    private final class Flight<T: Sendable>: AnyFlight {
+    private final class Flight<T: Sendable> {
+        let id = UUID()
         let task: Task<T, Error>
+        var waiters: Set<UUID> = []
         init(_ task: Task<T, Error>) { self.task = task }
-        func awaitResult() async throws -> Any { try await task.value }
     }
 
     // MARK: - Storage
 
-    /// A composite key that uniquely identifies an in-flight operation by
-    /// both its caller-supplied key and its expected return type.
-    ///
-    /// Including `typeID` prevents a caller expecting `String` from joining
-    /// a flight started by a caller expecting `Int` under the same string key.
-    private struct FlightKey: Hashable {
-        /// The caller-supplied key, type-erased to `AnyHashable`.
+    // AnyHashable only ever wraps a `Key: Sendable` (see `execute`).
+    private struct FlightKey: Hashable, @unchecked Sendable {
         let key: AnyHashable
-        /// The `ObjectIdentifier` of the expected return type `T`.
         let typeID: ObjectIdentifier
     }
 
-    private var flights: [FlightKey: AnyFlight] = [:]
+    /// Type-erased view of a flight's waiter bookkeeping.
+    private struct Entry {
+        let id: UUID
+        let box: AnyObject
+        let cancel: () -> Void
+        let removeWaiter: (UUID) -> Bool   // true when no waiters remain
+    }
+
+    private var flights: [FlightKey: Entry] = [:]
 
     // MARK: - Execute
 
-    /// Joins an existing in-flight operation or starts a new one.
-    ///
-    /// If an operation for `(key, T)` is already in progress, the caller
-    /// suspends and receives its result when it completes. Otherwise a new
-    /// `Task<T, Error>` is created, stored under `flightKey`, and awaited.
-    /// The entry is removed from the registry when the task finishes —
-    /// whether by success, failure, or cancellation.
-    ///
-    /// - Parameters:
-    ///   - key: A `Hashable & Sendable` value identifying the operation.
-    ///   - operation: The async throwing closure to execute if no flight
-    ///     is currently in progress for this key and return type.
-    /// - Returns: The value produced by the in-flight or newly started operation,
-    ///   shared across all concurrent callers for the same key.
-    /// - Throws: Rethrows any error from the operation to all waiting callers.
     func execute<Key: Hashable & Sendable, T: Sendable>(
         key: Key,
         operation: @escaping @Sendable () async throws -> T
@@ -97,32 +75,50 @@ internal actor SingleFlightRegistry {
             typeID: ObjectIdentifier(T.self)
         )
 
-        // Join existing flight — the downcast to Flight<T> is guaranteed safe
-        // because FlightKey.typeID encodes T, so only a Flight<T> can be stored
-        // under this key. No force cast is required.
-        if let existing = flights[flightKey] as? Flight<T> {
+        // The downcast is guaranteed safe because FlightKey.typeID encodes T.
+        let flight: Flight<T>
+        if let existing = flights[flightKey]?.box as? Flight<T> {
             Diagnostics.log("withSingleFlight.joined", key: String(describing: key))
-            return try await existing.task.value
+            flight = existing
+        } else {
+            // Register before suspending so concurrent callers join this flight.
+            Diagnostics.log("withSingleFlight.started", key: String(describing: key))
+            let new = Flight<T>(Task { try await operation() })
+            flights[flightKey] = Entry(
+                id: new.id,
+                box: new,
+                cancel: { new.task.cancel() },
+                removeWaiter: { new.waiters.remove($0); return new.waiters.isEmpty }
+            )
+            flight = new
         }
 
-        // No flight in progress — start one and register it before suspending
-        // so that concurrent callers arriving during the first await join it.
-        Diagnostics.log("withSingleFlight.started", key: String(describing: key))
-
-        let task = Task<T, Error> { try await operation() }
-        flights[flightKey] = Flight(task)
-
+        let waiterID = UUID()
+        flight.waiters.insert(waiterID)
         defer {
-            flights[flightKey] = nil
+            release(flightKey, flightID: flight.id, waiter: waiterID)
             Diagnostics.log("withSingleFlight.completed", key: String(describing: key))
         }
 
-        return try await task.value
+        let task = flight.task
+        let flightID = flight.id
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            // Caller cancelled: leave the flight, cancelling the work if nobody is left.
+            Task { await self.release(flightKey, flightID: flightID, waiter: waiterID) }
+        }
     }
 
-    /// The number of distinct operations currently in flight.
-    ///
-    /// Intended for diagnostics and unit tests only. Not part of the public API.
+    /// Removes `waiter`; when the last one leaves, cancels the work and drops the entry.
+    /// Idempotent, and a no-op if the key now belongs to a newer flight.
+    private func release(_ key: FlightKey, flightID: UUID, waiter: UUID) {
+        guard let entry = flights[key], entry.id == flightID else { return }
+        guard entry.removeWaiter(waiter) else { return }
+        entry.cancel()
+        flights[key] = nil
+    }
+
     func inFlightCount() -> Int {
         flights.count
     }

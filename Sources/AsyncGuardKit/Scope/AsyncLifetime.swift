@@ -79,10 +79,20 @@ public final class AsyncLifetime: @unchecked Sendable {
     ///
     /// Called by ``AsyncTask/bind(to:)``. Not intended for direct use.
     internal func add(_ cancellable: AsyncTask) {
+        let id = ObjectIdentifier(cancellable)
+        // Finished tasks drop out so a long-lived owner doesn't accumulate them.
+        // Insert before registering the hook so a fast finish can't remove first.
         _lock.withLock {
-            _tasks[ObjectIdentifier(cancellable)] = cancellable
+            _tasks[id] = cancellable
+        }
+        if !cancellable.onFinish({ [weak self] in self?.remove(id) }) {
+            remove(id)
         }
         Diagnostics.log("AsyncLifetime.taskAdded", context: "count=\(count)")
+    }
+
+    private func remove(_ id: ObjectIdentifier) {
+        _lock.withLock { _tasks[id] = nil }
     }
 
     // MARK: - Public API
